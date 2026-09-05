@@ -180,11 +180,15 @@
     if (!e.prov) { e.prov = todayStr(); setCourse(c); stamp('course.' + id + '.prov'); }
   }
   function confirmStep(id) {
+    /* CSS(pointer-events:none)만으로는 방어가 아니다.
+       "어제의 성공은 위조할 수 없다"는 로직 계층에서 지켜져야 한다. */
+    if (stepPhase(id) !== 'due') return false;
     var c = getCourse(); var e = c[id] || (c[id] = { g: [] });
     e.conf = todayStr(); setCourse(c); stamp('course.' + id + '.conf');
     reviewEnroll(id);
     var st = C.byId(id);
     if (st && st.mod && !isDone(st.mod)) { var p = getProg(); p[st.mod] = 1; setProg(p); stamp('progress.' + st.mod); }
+    return true;
   }
   function unconfirm(id) {   /* 확정 시도 실패 → 하루 더 */
     var c = getCourse(); var e = c[id]; if (!e) return;
@@ -1384,7 +1388,8 @@
     }
     /* 확정 통과 (콜드 스타트) */
     if (t.hasAttribute('data-conf')) {
-      confirmStep(t.getAttribute('data-conf')); markToday(false);
+      if (!confirmStep(t.getAttribute('data-conf'))) return;   /* 아직 확정할 수 없는 날 */
+      markToday(false);
       keepScroll = true; render(); return;
     }
     /* 확정 실패 — 하루 더 */

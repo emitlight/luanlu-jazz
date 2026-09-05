@@ -21,6 +21,8 @@
     progress: 'luanlu.progress.v1',
     diary: 'luanlu.diary.v1',
     diaryDel: 'luanlu.diarydel.v1',
+    review: 'luanlu.review.v1',
+    days: 'luanlu.days.v1',
     session: 'luanlu.session.v1',
     lastSync: 'luanlu.lastsync.v1'
   };
@@ -56,6 +58,8 @@
       progress: rd(LS.progress, '{}'),
       diary: rd(LS.diary, '[]'),
       diaryDeleted: rd(LS.diaryDel, '[]'),
+      review: rd(LS.review, '{}'),
+      days: rd(LS.days, '{}'),
       stamps: rd('luanlu.stamps.v1', '{}'),
       updatedAt: new Date().toISOString()
     };
@@ -66,6 +70,8 @@
     if (p.progress) wr(LS.progress, p.progress);
     if (p.diary) wr(LS.diary, p.diary);
     if (p.diaryDeleted) wr(LS.diaryDel, p.diaryDeleted);
+    if (p.review) wr(LS.review, p.review);
+    if (p.days) wr(LS.days, p.days);
     if (p.stamps) wr('luanlu.stamps.v1', p.stamps);
   }
 
@@ -91,7 +97,22 @@
         if (ta === tb) g[i] = (ga[i] || gb[i]) ? 1 : 0;   /* 둘 다 미기록이면 합집합(구버전 데이터) */
         else g[i] = (ta > tb ? ga[i] : gb[i]) ? 1 : 0;
       }
-      out[id] = { g: g };
+      /* 게이트 배열만 재조립하고 prov/conf를 버리면, 백업 복원 한 번으로
+         '예비 통과'가 사라지고 stepDone()이 구버전 분기로 빠져 완료로 둔갑한다.
+         2단 게이트 상태도 도장으로 병합한다. */
+      var ea = (a || {})[id] || {}, eb = (b || {})[id] || {};
+      var cell = { g: g };
+      ['prov', 'conf'].forEach(function (f) {
+        var k = 'course.' + id + '.' + f;
+        var ta = stampOf(sa, k), tb = stampOf(sb, k);
+        var v;
+        if (ta === tb) v = ea[f] || eb[f];          /* 도장 없으면 있는 쪽 */
+        else v = (ta > tb) ? ea[f] : eb[f];
+        if (v) cell[f] = v;
+      });
+      /* 확정은 예비보다 뒤에 올 수 없다 — 시계 왜곡 방어 */
+      if (cell.conf && cell.prov && cell.conf < cell.prov) delete cell.conf;
+      out[id] = cell;
     });
     return out;
   }
@@ -108,6 +129,32 @@
       if (ta === tb) v = ((a || {})[id] || (b || {})[id]) ? 1 : 0;
       else v = (ta > tb ? (a || {})[id] : (b || {})[id]) ? 1 : 0;
       if (v) out[id] = 1;
+    });
+    return out;
+  }
+
+  /* 복습 카드: 도장 비교로 최신 상자/도래일이 이긴다 */
+  function mergeReview(a, b, sa, sb) {
+    var out = {}, ids = {};
+    Object.keys(a || {}).forEach(function (k) { ids[k] = 1; });
+    Object.keys(b || {}).forEach(function (k) { ids[k] = 1; });
+    Object.keys(ids).forEach(function (id) {
+      var k = 'review.' + id;
+      var ta = stampOf(sa, k), tb = stampOf(sb, k);
+      var pick = (ta === tb) ? ((a || {})[id] || (b || {})[id])
+                             : (ta > tb ? (a || {})[id] : (b || {})[id]);
+      if (pick) out[id] = pick;
+    });
+    return out;
+  }
+  /* 연습한 날짜는 사실이므로 합집합. 정규 연습(1)이 최소 실행(2)을 이긴다 */
+  function mergeFlags2(a, b) {
+    var out = {}, ks = {};
+    Object.keys(a || {}).forEach(function (k) { ks[k] = 1; });
+    Object.keys(b || {}).forEach(function (k) { ks[k] = 1; });
+    Object.keys(ks).forEach(function (k) {
+      var x = (a || {})[k], y = (b || {})[k];
+      out[k] = (x === 1 || y === 1) ? 1 : (x || y);
     });
     return out;
   }
@@ -153,6 +200,8 @@
       progress: mergeFlags(local.progress, remote.progress, sa, sb, 'progress'),
       diary: mergeDiary(local.diary, remote.diary, deleted),
       diaryDeleted: deleted,
+      review: mergeReview(local.review, remote.review, sa, sb),
+      days: mergeFlags2(local.days, remote.days),
       stamps: mergeStamps(sa, sb),
       updatedAt: new Date().toISOString()
     };
