@@ -3,8 +3,9 @@
 docs/
 # 초기 기획서·프로토타입 백업
 초안_backup/
-# 에이전트 설정
-.claude/
+# 에이전트 설정 — 역할별 전문 에이전트 정의는 공개(재현 가능하게), 나머지는 제외
+.claude/*
+!.claude/agents/
 
 # 덱 관련 — 저장소에는 deck.html + luanlu-deck.pptx 만 둔다
 루앤루_기획안_사용매뉴얼.html
