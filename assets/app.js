@@ -32,7 +32,18 @@
   function readLS(key, dflt) {
     try { return JSON.parse(localStorage.getItem(key) || dflt); } catch (e) { return JSON.parse(dflt); }
   }
-  window.LUANLU_STORE_FAILED = function () { return storeFailed; };
+  /* 실패 플래그를 그대로 믿지 않는다 — 저장이 복구됐는데 배너가 영구히 남는 걸 막는다.
+     배너를 그릴 때마다 실제로 한 번 써 보고 판정한다. */
+  function probeStore() {
+    if (!storeFailed) return false;
+    try {
+      localStorage.setItem('luanlu.__probe', '1');
+      localStorage.removeItem('luanlu.__probe');
+      storeFailed = false;
+    } catch (e) { storeFailed = true; }
+    return storeFailed;
+  }
+  window.LUANLU_STORE_FAILED = function () { return probeStore(); };
 
   /* ── 변경 시각 도장 ──
      값마다 언제 바뀌었는지를 따로 기록한다. 이게 없어서 기기 간 병합이
