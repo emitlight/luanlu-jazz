@@ -18,6 +18,10 @@
     { id: 'guide',    n: '05', label: '이용안내' }
   ];
 
+  /* ── 동기화 (sync.js가 없으면 조용히 무시 — 앱은 로컬만으로 완전 동작) ── */
+  function SY() { return window.LUANLU_SYNC || null; }
+  function syncTouch() { var s = SY(); if (s) s.touch(); }
+
   /* ── 진도 (localStorage, file:// 안전) ── */
   var PKEY = 'luanlu.progress.v1';
   function getProg() {
@@ -25,6 +29,7 @@
   }
   function setProg(p) {
     try { localStorage.setItem(PKEY, JSON.stringify(p)); } catch (e) {}
+    syncTouch();
   }
   function isDone(id) { return !!getProg()[id]; }
   function toggleDone(id) { var p = getProg(); if (p[id]) delete p[id]; else p[id] = 1; setProg(p); }
@@ -34,7 +39,7 @@
   /* ── 코스 진도 (스텝별 통과 기준 체크) ── */
   var CKEY = 'luanlu.course.v1';
   function getCourse() { try { return JSON.parse(localStorage.getItem(CKEY) || '{}'); } catch (e) { return {}; } }
-  function setCourse(c) { try { localStorage.setItem(CKEY, JSON.stringify(c)); } catch (e) {} }
+  function setCourse(c) { try { localStorage.setItem(CKEY, JSON.stringify(c)); } catch (e) {} syncTouch(); }
   function gatesOf(id) { var e = getCourse()[id]; return (e && e.g) || []; }
   function stepDone(id) {
     var st = C.byId(id); if (!st) return false;
@@ -62,7 +67,7 @@
   var DKEY = 'luanlu.diary.v1';
   var diaryEditId = null;
   function getDiary() { try { return JSON.parse(localStorage.getItem(DKEY) || '[]'); } catch (e) { return []; } }
-  function setDiary(d) { try { localStorage.setItem(DKEY, JSON.stringify(d)); } catch (e) {} }
+  function setDiary(d) { try { localStorage.setItem(DKEY, JSON.stringify(d)); } catch (e) {} syncTouch(); }
   function todayStr() { var d = new Date(), p = function (n) { return (n < 10 ? '0' : '') + n; }; return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()); }
   function escAttr(s) { return esc(s == null ? '' : String(s)).replace(/"/g, '&quot;'); }
   function copyText(t) {
@@ -73,7 +78,7 @@
     var g = function (id) { var el = document.getElementById(id); return el ? el.value.trim() : ''; };
     var tasks = [];
     for (var i = 0; i < 5; i++) { var txt = g('diary-t' + i); if (txt) { var cb = document.getElementById('diary-c' + i); tasks.push({ text: txt, done: cb ? cb.checked : false }); } }
-    var entry = { date: g('diary-date') || todayStr(), focus: g('diary-focus'), minutes: g('diary-min'), tempo: g('diary-tempo'), tasks: tasks, notes: g('diary-notes') };
+    var entry = { date: g('diary-date') || todayStr(), focus: g('diary-focus'), minutes: g('diary-min'), tempo: g('diary-tempo'), tasks: tasks, notes: g('diary-notes'), m: new Date().toISOString() };
     var d = getDiary();
     if (diaryEditId) { entry.id = diaryEditId; d = d.map(function (e) { return e.id === diaryEditId ? entry : e; }); diaryEditId = null; }
     else { entry.id = 'd' + new Date().getTime(); d.unshift(entry); }
@@ -81,10 +86,18 @@
   }
   function toggleDiaryTask(id, idx) {
     var d = getDiary();
-    d.forEach(function (e) { if (e.id === id && e.tasks && e.tasks[idx]) e.tasks[idx].done = !e.tasks[idx].done; });
+    d.forEach(function (e) { if (e.id === id && e.tasks && e.tasks[idx]) { e.tasks[idx].done = !e.tasks[idx].done; e.m = new Date().toISOString(); } });
     setDiary(d); render();
   }
-  function delDiary(id) { var d = getDiary().filter(function (e) { return e.id !== id; }); setDiary(d); if (diaryEditId === id) diaryEditId = null; render(); }
+  var DELKEY = 'luanlu.diarydel.v1';
+  function delDiary(id) {
+    var d = getDiary().filter(function (e) { return e.id !== id; });
+    try {
+      var gone = JSON.parse(localStorage.getItem(DELKEY) || '[]');
+      if (gone.indexOf(id) < 0) { gone.push(id); localStorage.setItem(DELKEY, JSON.stringify(gone)); }
+    } catch (e) {}
+    setDiary(d); if (diaryEditId === id) diaryEditId = null; render();
+  }
   function copyDiaryReview(id, btn) {
     var e = getDiary().filter(function (x) { return x.id === id; })[0]; if (!e) return;
     var L = ['[루앤루 연습일지 · 선생님 검수 요청]', '날짜: ' + e.date + (e.focus ? (' · 초점: ' + e.focus) : '')];
@@ -677,6 +690,55 @@
       '<span class="go">' + ytSvg + '<span>YT</span></span></a>';
   }
 
+
+  /* ════════════════ 동기화 패널 (나의 진도 안) ════════════════ */
+  function syncPanel() {
+    var S = SY();
+    var sum = S ? S.summary() : null;
+    var st = S ? S.state() : { configured: false, status: 'off' };
+
+    var counts = sum
+      ? '<div class="syncnums"><span><b>' + sum.gates + '</b> 통과 기준</span>' +
+        '<span><b>' + sum.modules + '</b> 모듈</span>' +
+        '<span><b>' + sum.diary + '</b> 일지</span></div>'
+      : '';
+
+    var backup = '<div class="cta-row" style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">' +
+      '<button class="btn sm" data-sync="export">⬇ 진도 내보내기 (.json)</button>' +
+      '<label class="btn sm" style="cursor:pointer;margin:0">⬆ 가져오기<input type="file" accept=".json,application/json" id="sync-file" style="display:none"></label>' +
+      '</div>';
+
+    var body;
+    if (!st.configured) {
+      body = '<div class="kbd-cap">이 브라우저에만 저장됩니다. 다른 기기와 이어지지 않습니다 — ' +
+        '아래 <b>내보내기 / 가져오기</b>로 옮기거나, 설정을 넣으면 자동 동기화가 켜집니다.</div>' + backup;
+    } else if (st.status === 'signedout') {
+      body = '<div class="kbd-cap">로그인하면 이 기기의 진도가 다른 기기와 자동으로 합쳐집니다.</div>' +
+        '<div class="dform-3" style="margin-top:10px;grid-template-columns:1fr 1fr auto">' +
+          '<div><label class="fld">이메일</label><input type="email" id="sync-email" autocomplete="username"></div>' +
+          '<div><label class="fld">비밀번호</label><input type="password" id="sync-pw" autocomplete="current-password"></div>' +
+          '<div style="display:flex;align-items:flex-end"><button class="btn solid" data-sync="signin">로그인</button></div>' +
+        '</div>' +
+        (st.error ? '<div class="syncerr">' + esc(st.error) + '</div>' : '') + backup;
+    } else {
+      var label = st.status === 'syncing' ? '동기화 중…'
+                : st.status === 'error' ? '동기화 실패'
+                : st.pending ? '변경사항 저장 대기 중…' : '동기화됨';
+      var when = st.lastSync ? new Date(st.lastSync).toLocaleString('ko-KR') : '아직 없음';
+      body = '<div class="syncstat ' + st.status + '"><span class="dot"></span>' + esc(label) +
+        '<span class="who">' + esc(st.email || '') + '</span></div>' +
+        '<div class="kbd-cap" style="margin-top:8px">마지막 동기화 · ' + esc(when) + '</div>' +
+        (st.error ? '<div class="syncerr">' + esc(st.error) + '</div>' : '') +
+        '<div class="cta-row" style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">' +
+          '<button class="btn sm" data-sync="now">지금 동기화</button>' +
+          '<button class="btn sm" data-sync="signout">로그아웃</button>' +
+        '</div>' + backup;
+    }
+
+    return '<div class="eyebrow">기기 간 동기화</div>' +
+      '<div class="card pad">' + counts + body + '</div>';
+  }
+
   /* ════════════════ 뷰: 나의 진도 ════════════════ */
   function viewProgress() {
     var total = allModuleIds().length, done = doneCount();
@@ -723,6 +785,7 @@
       '(전문은 그 스텝의 「더 깊게」 안에). 「심화」는 졸업 후 트랙이라 직접 체크하세요. ' +
       '(' + done + ' / ' + total + ' 모듈 · ' + pct + '%)</p>' +
       checks +
+      syncPanel() +
       '<div class="callout tip" style="margin-top:18px"><span class="lab">최종 목표</span>' +
       '<b><a class="brasstext" data-step="s21">STEP 21</a></b> — Autumn Leaves를 인트로–테마–솔로–엔딩까지 혼자 완주하기.</div>' +
     '</section>';
@@ -866,8 +929,38 @@
 
   /* ── 이벤트 위임 ── */
   document.addEventListener('click', function (ev) {
-    var t = ev.target.closest('[data-go],[data-step],[data-gate],[data-diarystep],[data-toggle],[data-focus],[data-diary],[data-dtask],[data-dedit],[data-ddel],[data-dcopy]');
+    var t = ev.target.closest('[data-go],[data-step],[data-gate],[data-diarystep],[data-toggle],[data-focus],[data-diary],[data-dtask],[data-dedit],[data-ddel],[data-dcopy],[data-sync]');
     if (!t) return;
+
+
+    if (t.hasAttribute('data-sync')) {
+      var act = t.getAttribute('data-sync'), S = SY();
+      if (!S) return;
+      if (act === 'export') {
+        var blob = S.exportBlob(), a = document.createElement('a');
+        a.href = URL.createObjectURL(blob); a.download = S.exportName();
+        document.body.appendChild(a); a.click(); document.body.removeChild(a);
+        setTimeout(function () { URL.revokeObjectURL(a.href); }, 2000);
+        return;
+      }
+      if (act === 'signin') {
+        var em = (document.getElementById('sync-email') || {}).value || '';
+        var pw = (document.getElementById('sync-pw') || {}).value || '';
+        if (!em || !pw) return;
+        t.textContent = '로그인 중…';
+        S.signIn(em.trim(), pw).then(function () { keepScroll = true; render(); })
+          .catch(function () { keepScroll = true; render(); });
+        return;
+      }
+      if (act === 'signout') { S.signOut().then(function () { keepScroll = true; render(); }); return; }
+      if (act === 'now') {
+        t.textContent = '동기화 중…';
+        S.sync().then(function () { keepScroll = true; render(); })
+          .catch(function () { keepScroll = true; render(); });
+        return;
+      }
+      return;
+    }
 
     if (t.hasAttribute('data-gate')) {
       var gp = t.getAttribute('data-gate').split(':');
@@ -897,6 +990,20 @@
     if (t.hasAttribute('data-go')) { ev.preventDefault(); go(t.getAttribute('data-go')); return; }
   });
 
+  document.addEventListener('change', function (ev) {
+    if (!ev.target || ev.target.id !== 'sync-file') return;
+    var f = ev.target.files && ev.target.files[0], S = SY();
+    if (!f || !S) return;
+    var rdr = new FileReader();
+    rdr.onload = function () {
+      try { S.importText(String(rdr.result)); alert('가져왔습니다. 기존 기록과 합쳐졌습니다.'); }
+      catch (e) { alert('가져오기 실패: ' + e.message); }
+      keepScroll = true; render();
+    };
+    rdr.readAsText(f);
+  });
+
+  window.LUANLU_RERENDER = function () { keepScroll = true; render(); };
   window.addEventListener('hashchange', render);
   renderPills();
   render();

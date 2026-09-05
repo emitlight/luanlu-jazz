@@ -522,3 +522,20 @@ details.acc[open]>summary .achev{transform:rotate(90deg);color:var(--brass)}
   .prow .pbar{grid-column:1/-1}
   .resume .rgo{margin-left:0;width:100%}
 }
+
+
+/* ── 기기 간 동기화 패널 ── */
+.syncnums{display:flex;gap:20px;flex-wrap:wrap;margin-bottom:12px;padding-bottom:12px;border-bottom:1px solid var(--line)}
+.syncnums span{font-size:12px;color:var(--ink-dim)}
+.syncnums b{font-family:var(--mono);font-size:17px;color:var(--brass);margin-right:5px}
+.syncstat{display:flex;align-items:center;gap:9px;font-size:13.5px;color:var(--ink)}
+.syncstat .dot{width:8px;height:8px;border-radius:50%;background:var(--ok);flex:none}
+.syncstat.syncing .dot{background:var(--brass)}
+.syncstat.error .dot{background:var(--warn)}
+.syncstat .who{margin-left:auto;font-family:var(--mono);font-size:10.5px;color:var(--ink-faint)}
+.syncerr{margin-top:9px;font-size:12.5px;color:var(--warn);background:rgba(218,150,112,.1);
+  border:1px solid rgba(218,150,112,.3);border-radius:8px;padding:9px 11px}
+input[type=email],input[type=password]{font-family:var(--kr);font-size:13.5px;color:var(--ink);
+  background:var(--panel-2);border:1px solid var(--line);border-radius:8px;padding:9px 11px;width:100%}
+input[type=email]:focus,input[type=password]:focus{outline:none;border-color:var(--brass-dim)}
+@media (max-width:620px){ .syncnums{gap:14px} }
