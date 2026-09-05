@@ -4,8 +4,9 @@
    설계 원칙
    ① 로컬 우선(local-first): 모든 읽기·쓰기는 localStorage가 먼저다.
       동기화가 꺼져 있거나 오프라인이어도 앱은 완전히 동작한다.
-   ② 합집합 병합: 기기 A에서 체크한 것과 기기 B에서 체크한 것을 모두 살린다.
-      (개인 학습 기록이라 "지운 것"만 따로 추적하고 나머지는 합친다)
+   ② 값마다 변경 시각(도장)을 남기고 최신 판단이 이긴다(LWW).
+      연습 기록의 '존재'만 합집합이다 — 그건 사실이라 충돌이 없다.
+      체크/해제 같은 '의사표시'를 합집합하면 해제가 파괴된다.
    ③ 외부 라이브러리 0: Supabase SDK 없이 REST + fetch만 사용한다.
 
    백엔드: Supabase(Postgres) · 테이블 public.sync · RLS로 본인 행만 접근
@@ -55,6 +56,7 @@
       progress: rd(LS.progress, '{}'),
       diary: rd(LS.diary, '[]'),
       diaryDeleted: rd(LS.diaryDel, '[]'),
+      stamps: rd('luanlu.stamps.v1', '{}'),
       updatedAt: new Date().toISOString()
     };
   }
@@ -64,29 +66,63 @@
     if (p.progress) wr(LS.progress, p.progress);
     if (p.diary) wr(LS.diary, p.diary);
     if (p.diaryDeleted) wr(LS.diaryDel, p.diaryDeleted);
+    if (p.stamps) wr('luanlu.stamps.v1', p.stamps);
   }
 
   /* ── 병합 ─────────────────────────────────────────────
-     통과 기준·모듈 완료는 OR(둘 중 하나라도 체크했으면 체크).
+     통과 기준·모듈 완료는 도장(변경 시각) 비교로 최신 판단이 이긴다.
      일지는 id 기준 합집합에서 삭제 목록을 뺀다. */
-  function mergeCourse(a, b) {
+  var EPOCH = '1970-01-01T00:00:00.000Z';
+  function stampOf(st, key) { return (st && st[key]) || EPOCH; }
+
+  /* 게이트: 셀마다 도장을 비교해 최신 판단이 이긴다.
+     예전에는 합집합이라 한 기기에서 푼 체크가 다른 기기 값으로 되살아났다 —
+     수렴은 했지만 "이제 못 하겠다"는 의사표시를 파괴했다. */
+  function mergeCourse(a, b, sa, sb) {
     var out = {}, ids = {};
     Object.keys(a || {}).forEach(function (k) { ids[k] = 1; });
     Object.keys(b || {}).forEach(function (k) { ids[k] = 1; });
     Object.keys(ids).forEach(function (id) {
       var ga = ((a || {})[id] || {}).g || [], gb = ((b || {})[id] || {}).g || [];
       var n = Math.max(ga.length, gb.length), g = [];
-      for (var i = 0; i < n; i++) g[i] = (ga[i] || gb[i]) ? 1 : 0;
+      for (var i = 0; i < n; i++) {
+        var key = 'course.' + id + '.' + i;
+        var ta = stampOf(sa, key), tb = stampOf(sb, key);
+        if (ta === tb) g[i] = (ga[i] || gb[i]) ? 1 : 0;   /* 둘 다 미기록이면 합집합(구버전 데이터) */
+        else g[i] = (ta > tb ? ga[i] : gb[i]) ? 1 : 0;
+      }
       out[id] = { g: g };
     });
     return out;
   }
-  function mergeFlags(a, b) {
-    var out = {};
-    Object.keys(a || {}).forEach(function (k) { if ((a || {})[k]) out[k] = 1; });
-    Object.keys(b || {}).forEach(function (k) { if ((b || {})[k]) out[k] = 1; });
+
+  /* 모듈 완료도 동일 — 해제가 유효한 의사표시다 */
+  function mergeFlags(a, b, sa, sb, prefix) {
+    var out = {}, ids = {};
+    Object.keys(a || {}).forEach(function (k) { ids[k] = 1; });
+    Object.keys(b || {}).forEach(function (k) { ids[k] = 1; });
+    Object.keys(ids).forEach(function (id) {
+      var key = prefix + '.' + id;
+      var ta = stampOf(sa, key), tb = stampOf(sb, key);
+      var v;
+      if (ta === tb) v = ((a || {})[id] || (b || {})[id]) ? 1 : 0;
+      else v = (ta > tb ? (a || {})[id] : (b || {})[id]) ? 1 : 0;
+      if (v) out[id] = 1;
+    });
     return out;
   }
+
+  function mergeStamps(sa, sb) {
+    var out = {}, ks = {};
+    Object.keys(sa || {}).forEach(function (k) { ks[k] = 1; });
+    Object.keys(sb || {}).forEach(function (k) { ks[k] = 1; });
+    Object.keys(ks).forEach(function (k) {
+      var x = stampOf(sa, k), y = stampOf(sb, k);
+      out[k] = x > y ? x : y;
+    });
+    return out;
+  }
+
   function mergeDiary(a, b, deleted) {
     var gone = {};
     (deleted || []).forEach(function (id) { gone[id] = 1; });
@@ -110,12 +146,14 @@
   function merge(local, remote) {
     if (!remote) return local;
     var deleted = mergeUnique(local.diaryDeleted, remote.diaryDeleted);
+    var sa = local.stamps || {}, sb = remote.stamps || {};
     return {
-      v: 1,
-      course: mergeCourse(local.course, remote.course),
-      progress: mergeFlags(local.progress, remote.progress),
+      v: 2,
+      course: mergeCourse(local.course, remote.course, sa, sb),
+      progress: mergeFlags(local.progress, remote.progress, sa, sb, 'progress'),
       diary: mergeDiary(local.diary, remote.diary, deleted),
       diaryDeleted: deleted,
+      stamps: mergeStamps(sa, sb),
       updatedAt: new Date().toISOString()
     };
   }

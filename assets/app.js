@@ -11,47 +11,69 @@
      자료실(사다리·테크닉·디코더·감상·강의)은 별도 화면이 아니라
      스텝/코스 페이지 안에 접이식으로 인라인되어 있다. */
   var ROUTES = [
-    { id: 'home',     n: '01', label: '홈' },
-    { id: 'course',   n: '02', label: '연습 코스' },
-    { id: 'progress', n: '03', label: '나의 진도' },
-    { id: 'diary',    n: '04', label: '연습일지' },
-    { id: 'guide',    n: '05', label: '이용안내' }
+    { id: 'my',     n: '01', label: '마이러닝' },
+    { id: 'course', n: '02', label: '코스 지도' },
+    { id: 'diary',  n: '03', label: '연습일지' },
+    { id: 'guide',  n: '04', label: '이용안내' }
   ];
 
   /* ── 동기화 (sync.js가 없으면 조용히 무시 — 앱은 로컬만으로 완전 동작) ── */
   function SY() { return window.LUANLU_SYNC || null; }
   function syncTouch() { var s = SY(); if (s) s.touch(); }
 
+  /* ── 저장 실패를 조용히 삼키지 않는다 ──
+     용량 초과·사파리 프라이빗 모드에서 쓰기가 실패해도 지금까지는 화면이 정상으로
+     보였다(catch(e){} 5곳). 실패를 상태로 올려 배너로 알린다. */
+  var storeFailed = false;
+  function writeLS(key, val) {
+    try { localStorage.setItem(key, JSON.stringify(val)); storeFailed = false; return true; }
+    catch (e) { storeFailed = true; return false; }
+  }
+  function readLS(key, dflt) {
+    try { return JSON.parse(localStorage.getItem(key) || dflt); } catch (e) { return JSON.parse(dflt); }
+  }
+  window.LUANLU_STORE_FAILED = function () { return storeFailed; };
+
+  /* ── 변경 시각 도장 ──
+     값마다 언제 바뀌었는지를 따로 기록한다. 이게 없어서 기기 간 병합이
+     "합집합"밖에 고를 수 없었고 체크 해제가 되살아났다.
+     키 형식: 'course.s06.1' / 'progress.shell' */
+  var SKEY = 'luanlu.stamps.v1';
+  function getStamps() { return readLS(SKEY, '{}'); }
+  function stamp(k) { var st = getStamps(); st[k] = new Date().toISOString(); writeLS(SKEY, st); }
+  window.LUANLU_STAMPS = getStamps;
+
   /* ── 진도 (localStorage, file:// 안전) ── */
   var PKEY = 'luanlu.progress.v1';
-  function getProg() {
-    try { return JSON.parse(localStorage.getItem(PKEY) || '{}'); } catch (e) { return {}; }
-  }
-  function setProg(p) {
-    try { localStorage.setItem(PKEY, JSON.stringify(p)); } catch (e) {}
-    syncTouch();
-  }
+  function getProg() { return readLS(PKEY, '{}'); }
+  function setProg(p) { writeLS(PKEY, p); syncTouch(); }
   function isDone(id) { return !!getProg()[id]; }
-  function toggleDone(id) { var p = getProg(); if (p[id]) delete p[id]; else p[id] = 1; setProg(p); }
+  function toggleDone(id) {
+    var p = getProg(); if (p[id]) delete p[id]; else p[id] = 1;
+    setProg(p); stamp('progress.' + id);
+  }
   function allModuleIds() { return Object.keys(D.modules); }
   function doneCount() { var p = getProg(), ids = allModuleIds(), c = 0; ids.forEach(function (i) { if (p[i]) c++; }); return c; }
 
   /* ── 코스 진도 (스텝별 통과 기준 체크) ── */
   var CKEY = 'luanlu.course.v1';
-  function getCourse() { try { return JSON.parse(localStorage.getItem(CKEY) || '{}'); } catch (e) { return {}; } }
-  function setCourse(c) { try { localStorage.setItem(CKEY, JSON.stringify(c)); } catch (e) {} syncTouch(); }
+  function getCourse() { return readLS(CKEY, '{}'); }
+  function setCourse(c) { writeLS(CKEY, c); syncTouch(); }
   function gatesOf(id) { var e = getCourse()[id]; return (e && e.g) || []; }
+  /* 완료 = '확정'까지 끝난 것. 예비 통과는 아직 완료가 아니다.
+     단 구버전 데이터(prov/conf 없이 게이트만 찬 것)는 완료로 인정해 호환한다. */
   function stepDone(id) {
-    var st = C.byId(id); if (!st) return false;
-    var g = gatesOf(id);
-    for (var i = 0; i < st.gates.length; i++) if (!g[i]) return false;
-    return true;
+    var m = gateMeta(id);
+    if (m.conf) return true;
+    if (m.prov) return false;
+    return gatesPassed(id);
   }
   function toggleGate(id, i) {
     var c = getCourse(), e = c[id] || (c[id] = { g: [] });
     e.g = e.g || [];
     e.g[i] = e.g[i] ? 0 : 1;
     setCourse(c);
+    stamp('course.' + id + '.' + i);
     // 스텝을 통과하면 연결된 테크닉 모듈도 진도에 반영
     var st = C.byId(id);
     if (st && st.mod && stepDone(id) && !isDone(st.mod)) { var p = getProg(); p[st.mod] = 1; setProg(p); }
@@ -63,11 +85,107 @@
     return C.steps[C.steps.length - 1];
   }
 
+  /* ── 연습 날짜 (스트릭) ──
+     진행바는 5~14일에 한 칸 움직인다. 매일의 행동은 매일 보상해야 한다. */
+  var DAYKEY = 'luanlu.days.v1';
+  function getDays() { return readLS(DAYKEY, '{}'); }
+  function markToday(minimal) {
+    var d = getDays(), t = todayStr();
+    if (d[t] !== 1) { d[t] = minimal ? 2 : 1; writeLS(DAYKEY, d); stamp('day.' + t); }
+    syncTouch();
+  }
+  function dayDiff(a, b) { return Math.round((new Date(b) - new Date(a)) / 86400000); }
+  function streakInfo() {
+    var d = getDays(), t = todayStr(), n = 0, cur = t;
+    if (!d[t]) { cur = shiftDay(t, -1); }
+    while (d[cur]) { n++; cur = shiftDay(cur, -1); }
+    var last = Object.keys(d).sort().pop() || null;
+    return { count: n, days: d, today: !!d[t], last: last,
+             gap: last ? dayDiff(last, t) : null };
+  }
+  function shiftDay(iso, delta) {
+    var dt = new Date(iso + 'T00:00:00');
+    dt.setDate(dt.getDate() + delta);
+    var p = function (n) { return (n < 10 ? '0' : '') + n; };
+    return dt.getFullYear() + '-' + p(dt.getMonth() + 1) + '-' + p(dt.getDate());
+  }
+
+  /* ── 복습 덱 (Leitner 3상자: 1일 / 4일 / 11일) ──
+     통과한 스텝은 currentStep()이 다시 주지 않는다. 앱이 직접 도래시킨다. */
+  var RKEY = 'luanlu.review.v1';
+  var BOXES = [1, 4, 11];
+  function getReview() { return readLS(RKEY, '{}'); }
+  function setReview(r) { writeLS(RKEY, r); syncTouch(); }
+  function reviewEnroll(stepId) {
+    var r = getReview();
+    if (r[stepId]) return;
+    r[stepId] = { box: 0, due: shiftDay(todayStr(), BOXES[0]) };
+    setReview(r); stamp('review.' + stepId);
+  }
+  function reviewGrade(stepId, how) {
+    var r = getReview(), c = r[stepId];
+    if (!c) return;
+    if (how === 'up') c.box = Math.min(c.box + 1, BOXES.length - 1);
+    else if (how === 'down') c.box = Math.max(0, c.box - 2);
+    c.due = shiftDay(todayStr(), BOXES[c.box]);
+    c.last = todayStr();
+    setReview(r); stamp('review.' + stepId);
+  }
+  /* 오늘 도래한 카드 — 상한 2장. 넘치면 오래 밀린 것부터 */
+  function dueCards(limit) {
+    var r = getReview(), t = todayStr(), out = [];
+    Object.keys(r).forEach(function (id) {
+      var c = r[id];
+      if (c.last === t) return;              /* 오늘 이미 함 */
+      if (c.due && c.due <= t) out.push({ id: id, box: c.box, due: c.due, over: dayDiff(c.due, t) });
+    });
+    out.sort(function (a, b) { return b.over - a.over; });
+    return out.slice(0, limit == null ? 2 : limit);
+  }
+  function doneToday(stepId) {
+    var c = getReview()[stepId];
+    return !!(c && c.last === todayStr());
+  }
+
+  /* ── 2단 게이트 (콜드 스타트 확정) ──
+     3개를 다 체크하면 '예비 통과'. 다음 날 워밍업 없이 첫 시도로 재통과해야 '확정'.
+     어제의 성공은 위조할 수 없다. */
+  function gateMeta(id) { return getCourse()[id] || {}; }
+  function gatesPassed(id) {
+    var st = C.byId(id); if (!st) return false;
+    var g = gatesOf(id);
+    for (var i = 0; i < st.gates.length; i++) if (!g[i]) return false;
+    return true;
+  }
+  function stepPhase(id) {
+    var m = gateMeta(id);
+    if (m.conf) return 'confirmed';
+    if (!gatesPassed(id)) return 'open';
+    if (m.prov && m.prov < todayStr()) return 'due';   /* 확정 시도 가능 */
+    return 'prov';                                      /* 오늘 예비 통과 */
+  }
+  function markProvisional(id) {
+    var c = getCourse(); var e = c[id] || (c[id] = { g: [] });
+    if (!e.prov) { e.prov = todayStr(); setCourse(c); stamp('course.' + id + '.prov'); }
+  }
+  function confirmStep(id) {
+    var c = getCourse(); var e = c[id] || (c[id] = { g: [] });
+    e.conf = todayStr(); setCourse(c); stamp('course.' + id + '.conf');
+    reviewEnroll(id);
+    var st = C.byId(id);
+    if (st && st.mod && !isDone(st.mod)) { var p = getProg(); p[st.mod] = 1; setProg(p); stamp('progress.' + st.mod); }
+  }
+  function unconfirm(id) {   /* 확정 시도 실패 → 하루 더 */
+    var c = getCourse(); var e = c[id]; if (!e) return;
+    e.prov = todayStr(); delete e.conf;
+    setCourse(c); stamp('course.' + id + '.prov');
+  }
+
   /* ── 연습일지 (localStorage) ── */
   var DKEY = 'luanlu.diary.v1';
   var diaryEditId = null;
-  function getDiary() { try { return JSON.parse(localStorage.getItem(DKEY) || '[]'); } catch (e) { return []; } }
-  function setDiary(d) { try { localStorage.setItem(DKEY, JSON.stringify(d)); } catch (e) {} syncTouch(); }
+  function getDiary() { return readLS(DKEY, '[]'); }
+  function setDiary(d) { writeLS(DKEY, d); syncTouch(); }
   function todayStr() { var d = new Date(), p = function (n) { return (n < 10 ? '0' : '') + n; }; return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()); }
   function escAttr(s) { return esc(s == null ? '' : String(s)).replace(/"/g, '&quot;'); }
   function copyText(t) {
@@ -364,6 +482,223 @@
       '<div class="kbd-cap" style="margin-top:6px">연습 전후 5분. 손이 아니라 <b>귀</b>를 그 스텝에 맞추는 시간입니다.</div></div>';
   }
 
+
+  /* ══════════════ 마이러닝 블록들 ══════════════ */
+
+  /* 진도 링 — 의존성 없는 인라인 SVG */
+  function ringSVG(pct, done, total) {
+    var C0 = 2 * Math.PI * 40;
+    var off = C0 * (1 - pct / 100);
+    return '<svg class="ring" viewBox="0 0 88 88" role="img" aria-label="진행률 ' + pct + '퍼센트">' +
+      '<g transform="rotate(-90 44 44)">' +
+      '<circle class="rg-track" cx="44" cy="44" r="40"></circle>' +
+      '<circle class="rg-val" cx="44" cy="44" r="40" stroke-dasharray="' + C0.toFixed(1) +
+        '" stroke-dashoffset="' + off.toFixed(1) + '"></circle></g>' +
+      '<text class="rg-pct" x="44" y="42">' + pct + '%</text>' +
+      '<text class="rg-sub" x="44" y="60">' + done + '/' + total + '</text></svg>';
+  }
+
+  /* ① 오늘 이 한 장 — 상태에 따라 다섯 얼굴 */
+  function blkToday() {
+    var cur = currentStep(), ph = C.phase(cur.phase), total = C.steps.length;
+    var sk = streakInfo();
+    var phase = stepPhase(cur.id);
+    var cls = 'is-resume', lab = '이어서 하기', act = 'STEP ' + cur.n + ' 열기 →', sub = esc(cur.goal), extra = '';
+
+    if (courseDone() === 0 && !sk.count) { cls = 'is-start'; lab = '여기서 시작'; act = 'STEP ' + cur.n + ' 시작 →'; }
+    if (phase === 'due') {
+      cls = 'is-confirm'; lab = '◐ 확정 대기 · 어제 예비 통과';
+      act = '워밍업 없이 첫 시도 →';
+      sub = '어제 통과 기준을 다 채웠습니다. 오늘 <b>가장 먼저</b>, 워밍업 없이 대표 항목 하나만 다시 되면 확정입니다.';
+      extra = '<a class="today-min" data-retry="' + cur.id + '">안 됐다 — 하루 더</a>';
+    } else if (sk.gap != null && sk.gap >= 3) {
+      cls = 'is-back'; lab = sk.gap + '일 만이네요';
+      act = '줄인 오늘로 시작 →';
+      sub = '오래 쉬었으니 오늘은 <b>복습 카드와 첫 드릴 하나</b>만 하세요. 그것만으로도 연속이 이어집니다.';
+      extra = '<a class="today-min" data-min="' + cur.id + '">5분만 하기</a>';
+    } else if (sk.today) {
+      cls = 'is-done'; lab = '✓ 오늘 완료';
+      sub = '오늘 몫은 끝냈습니다. 더 해도 좋지만, 안 해도 연속은 유지됩니다.';
+      act = '📔 일지 쓰기 →';
+      extra = '<a class="today-min" data-step="' + cur.id + '">한 번 더 보기</a>';
+    } else {
+      extra = '<a class="today-min" data-min="' + cur.id + '">5분만 하기</a>';
+    }
+
+    var actAttr = (cls === 'is-done') ? 'data-diarystep="' + cur.id + '"' : 'data-step="' + cur.id + '"';
+    return '<section class="today ' + cls + '" data-step="' + cur.id + '">' +
+      '<span class="today-lab">' + lab + '</span>' +
+      '<div class="today-meta"><span class="tm-phase">' + esc(ph.n + ' · ' + ph.title) + '</span>' +
+        '<span class="tm-n">STEP ' + cur.n + ' / ' + total + '</span></div>' +
+      '<h2 class="today-title">' + esc(cur.title) + '</h2>' +
+      '<div class="today-goal">' + sub + '</div>' +
+      '<div class="today-chips"><span class="chip time">⏱ ' + cur.mins + '분</span>' +
+        '<span class="chip">' + esc(cur.days) + '</span>' +
+        (cur.key ? '<span class="pill solid">★ 핵심</span>' : '') +
+        (cur.song ? '<span class="chip song">' + esc(songTitle(cur.song.dec)) + '</span>' : '') + '</div>' +
+      '<a class="btn solid today-act" ' + actAttr + '>' + act + '</a>' + extra +
+    '</section>';
+  }
+
+  /* ② 연속 기록 */
+  function blkStreak() {
+    var sk = streakInfo(), t = todayStr(), dots = '';
+    for (var i = 6; i >= 0; i--) {
+      var d = shiftDay(t, -i), v = sk.days[d];
+      var c = v === 1 ? 'on' : v === 2 ? 'min' : 'off';
+      if (i === 0) c += ' is-today';
+      dots += '<i class="' + c + '"></i>';
+    }
+    var note = sk.count ? '5분 최소 실행도 연속으로 칩니다' : '오늘 5분만 해도 시작됩니다';
+    return '<div class="streak">' +
+      '<div class="sk-dots">' + dots + '</div>' +
+      '<span class="sk-count">' + (sk.count ? sk.count + '일째' : '오늘이 1일째') + '</span>' +
+      '<span class="sk-note">' + note + '</span></div>';
+  }
+
+  /* ③ 복습 덱 — 카드에서 이동 없이 그 자리에서 완결 */
+  function blkRevdeck(compact) {
+    var cards = dueCards(2);
+    var doneList = Object.keys(getReview()).filter(doneToday);
+    if (!cards.length && !doneList.length) {
+      return compact ? '' :
+        '<div class="revdeck"><div class="rd-head"><h4>오늘의 복습</h4></div>' +
+        '<div class="rd-empty">오늘 도래한 복습이 없습니다 — 새 스텝을 통과하면 1일 뒤부터 여기 나옵니다.</div></div>';
+    }
+    var html = cards.map(function (c) {
+      var st = C.byId(c.id); if (!st) return '';
+      var rep = st.gates[0];
+      return '<div class="revcard">' +
+        '<div class="rc-src">STEP ' + st.n + ' · ' + esc(st.title) + ' · 상자 ' + (c.box + 1) +
+          ' (' + BOXES[c.box] + '일 간격)' + (c.over > 0 ? ' · ' + c.over + '일 밀림' : '') + '</div>' +
+        '<div class="rc-task">' + esc(st.drills[0].t) + ' — ' + st.drills[0].d + '</div>' +
+        '<div class="rc-crit">판정 — ' + esc(rep) + '</div>' +
+        '<div class="rc-acts">' +
+          '<button class="btn ok" data-rev="' + c.id + ':up">됐다</button>' +
+          '<button class="btn" data-rev="' + c.id + ':hold">애매</button>' +
+          '<button class="btn warn" data-rev="' + c.id + ':down">안 됐다</button>' +
+        '</div></div>';
+    }).join('');
+    html += doneList.map(function (id) {
+      var st = C.byId(id); if (!st) return '';
+      var c = getReview()[id];
+      return '<div class="revcard is-done"><span class="rc-tick">✓</span>STEP ' + st.n + ' · ' +
+        esc(st.title) + ' — 다음 ' + BOXES[c.box] + '일 뒤</div>';
+    }).join('');
+    return '<div class="revdeck"><div class="rd-head"><h4>오늘의 복습 · ' + cards.length + '장</h4>' +
+      '<span class="pill out">워밍업 대신</span></div>' + html + '</div>';
+  }
+
+  /* ④ 진행 */
+  function blkProgress() {
+    var done = courseDone(), total = C.steps.length;
+    var pct = Math.round(done / total * 100);
+    var rows = C.phases.map(function (p) {
+      var ss = C.stepsOf(p.id);
+      var dn = ss.filter(function (x) { return stepDone(x.id); }).length;
+      var w = Math.round(dn / ss.length * 100);
+      return '<div class="prow" data-go="course"><span class="pw">' + esc(p.title) + '</span>' +
+        '<span class="pbar"><i style="width:' + w + '%"></i></span>' +
+        '<span class="pct">' + dn + '/' + ss.length + '</span></div>';
+    }).join('');
+    return '<div class="progblock">' + ringSVG(pct, done, total) +
+      '<div class="phaserows" style="margin:0">' + rows + '</div></div>';
+  }
+
+  /* ⑤ 최근 연습 */
+  function blkRecent() {
+    var d = getDiary().slice(0, 3);
+    if (!d.length) return '<div class="rd-empty">아직 기록이 없습니다 — 오늘 연습 뒤 「이 스텝으로 연습일지 쓰기」를 눌러보세요.</div>';
+    return '<div class="recent">' + d.map(function (e) {
+      var meta = [];
+      if (e.minutes) meta.push(e.minutes + '분');
+      if (e.tempo) meta.push(e.tempo + 'bpm');
+      return '<div class="rcrow" data-go="diary"><span class="rc-date">' + esc(e.date) + '</span>' +
+        '<span class="rc-focus">' + esc(e.focus || '(초점 미기재)') + '</span>' +
+        '<span class="rc-meta">' + meta.join(' · ') + '</span></div>';
+    }).join('') + '</div>';
+  }
+
+  /* ⑥ 시스템 배너 — 저장 실패는 조용히 넘어가지 않는다 */
+  function renderSysbar() {
+    var el = document.getElementById('sysbar');
+    if (!el) return;
+    if (window.LUANLU_STORE_FAILED && window.LUANLU_STORE_FAILED()) {
+      el.innerHTML = '<div class="sysbar err"><span class="sb-dot"></span>' +
+        '<span class="sb-msg">진도를 저장하지 못했습니다. 저장공간이 가득 찼거나 사생활 보호 모드일 수 있습니다. ' +
+        '<b>지금 화면의 기록은 새로고침하면 사라집니다.</b></span>' +
+        '<span class="sb-acts"><button class="btn sm" data-sync="export">지금 백업</button></span></div>';
+      return;
+    }
+    var sy = SY && SY();
+    if (sy) {
+      var st = sy.state();
+      if (st.pending && !navigator.onLine) {
+        el.innerHTML = '<div class="sysbar wait"><span class="sb-dot"></span>' +
+          '<span class="sb-msg">저장됨 · 동기화 대기 중 — 연결되면 자동으로 올라갑니다.</span></div>';
+        return;
+      }
+    }
+    el.innerHTML = '';
+  }
+  window.LUANLU_SYSBAR = renderSysbar;
+
+  /* ══════════════ 뷰: 마이러닝 ══════════════ */
+  function viewMy() {
+    var vault =
+      acc('深', '심화 트랙', '졸업 이후 · 순서 없이 관심 가는 것부터',
+        C.extra.map(function (e) {
+          var m = D.modules[e.mod], l = D.lectures[e.lec];
+          return acc('·', esc(m.title), esc(e.why),
+            modFull(e.mod) + (l ? '<div class="section"><h4>대표 강의</h4><div class="lecgroup">' + lectureRow(l, 0) + '</div></div>' : ''));
+        }).join('')) +
+      acc('💿', '시대별 감상', '연습 전후 5분, 귀를 맞추는 시간',
+        D.listening.map(function (e) {
+          var tr = e.tracks.map(function (t) {
+            return '<a class="track" href="' + D.yt(t.a + ' ' + t.w) + '" target="_blank" rel="noopener">' +
+              '<span class="ti"><span class="ar">' + esc(t.a) + (t.p ? '<span class="pf">🎹</span>' : '') + '</span>' +
+              '<span class="wk">' + esc(t.w) + '</span></span>' +
+              '<span class="go">' + ytSvg + '<span>YT</span></span></a>';
+          }).join('');
+          var al = (e.albums || []).map(function (a) {
+            return '<a class="track" href="' + D.yt(a.q) + '" target="_blank" rel="noopener">' +
+              '<span class="ti"><span class="ar">' + esc(a.a) + '</span><span class="wk">' + esc(a.al) + '</span>' +
+              '<span class="why">' + esc(a.why) + '</span></span>' +
+              '<span class="go">' + ytSvg + '<span>YT</span></span></a>';
+          }).join('');
+          return acc('·', esc(e.en) + ' <span class="faint">· ' + esc(e.kr) + '</span>', esc(e.yr),
+            tr + (al ? '<div class="miniban" style="margin-top:12px">필청 음반</div>' + al : ''));
+        }).join('')) +
+      acc('🎥', '강의 전체 · 24편', '스텝마다 1편은 이미 그 안에 있습니다',
+        D.levels.map(function (lv) {
+          var order = D.lectureOrder[lv.id] || [];
+          return '<div class="miniban" style="margin-top:14px">' + esc(lv.title) + '</div><div class="lecgroup">' +
+            order.map(function (lid, i) { return lectureRow(D.lectures[lid], i); }).join('') + '</div>';
+        }).join('')) +
+      acc('🎼', '스탠다드 25곡', '졸업 후 다음 곡 고르기',
+        '<div class="stdlist">' + D.standards.map(function (x) {
+          return '<div class="std"><div class="std-main"><div class="std-head">' +
+            '<span class="std-t">' + esc(x.t) + '</span> <span class="std-c">' + esc(x.c) + '</span>' +
+            (x.first ? ' <span class="pill solid">첫곡</span>' : '') + '</div>' +
+            '<div class="std-meta"><span class="chip">' + esc(x.key) + '</span><span class="chip">' + esc(x.form) + '</span>' +
+            '<span class="chip">' + esc(x.tech) + '</span></div>' +
+            '<div class="std-note">' + esc(x.note) + '</div></div>' +
+            '<a class="go" href="' + D.yt(x.q) + '" target="_blank" rel="noopener">' + ytSvg + '<span>YT</span></a></div>';
+        }).join('') + '</div>');
+
+    return '<section class="view view--my">' +
+      blkToday() +
+      blkStreak() +
+      blkRevdeck(false) +
+      '<div class="eyebrow">진행</div>' + blkProgress() +
+      '<div class="eyebrow">최근 연습</div>' + blkRecent() +
+      '<div class="eyebrow">자료실</div>' +
+      '<p class="body">코스를 하다 더 알고 싶을 때만 펼치세요. 각 스텝에 필요한 부분은 이미 그 안에 있습니다.</p>' +
+      vault +
+      '<div class="eyebrow">저장 · 동기화</div>' + syncPanel() +
+    '</section>';
+  }
+
   function viewCourse() {
     var cur = currentStep();
     var done = courseDone(), total = C.steps.length;
@@ -379,13 +714,26 @@
         var badge = isDoneS ? '<span class="tag">완료</span>'
           : (isCur ? '<span class="tag">지금 여기</span>'
           : (part ? '<span class="badge soft">' + part + '/' + s.gates.length + '</span>' : ''));
-        return '<div class="srow' + (isDoneS ? ' done' : '') + (isCur ? ' now' : '') + '" data-step="' + s.id + '">' +
-          '<span class="sn">' + mark + '</span>' +
-          '<span class="sc"><span class="sname">' + esc(s.title) + ' ' + badge + '</span>' +
-            '<span class="sgoal">' + esc(s.goal) + '</span>' +
-            '<span class="smeta">' + s.mins + '분 · ' + esc(s.days) +
-              (s.song ? ' · <b>' + esc(songTitle(s.song.dec)) + '</b>' : '') + '</span></span>' +
-          '<span class="parrow">›</span></div>';
+        var ph = stepPhase(s.id);
+        var cls = isDoneS ? 'is-done' : (ph === 'prov' || ph === 'due' ? 'is-prov' : (isCur ? 'is-now' : 'is-future'));
+        var gg = gatesOf(s.id), part = gg.filter(Boolean).length;
+        var mini = (!isDoneS && part) ? '<div class="sc-mini"><i style="width:' +
+          Math.round(part / s.gates.length * 100) + '%"></i></div>' : '';
+        var pill = isDoneS ? '<span class="pill ok">✓ 확정</span>'
+          : ph === 'due' ? '<span class="pill prov">◐ 확정 대기</span>'
+          : ph === 'prov' ? '<span class="pill prov">◐ 예비 통과</span>'
+          : (isCur ? '<span class="pill solid">지금 여기</span>' : (s.key ? '<span class="pill solid">★ 핵심</span>' : ''));
+        var glyph = isDoneS ? '✓' : (ph === 'prov' || ph === 'due' ? '◐' : (isCur ? '▶' : String(s.n)));
+        return '<div class="stepcard ' + cls + '" data-step="' + s.id + '">' +
+          '<span class="sc-n">' + glyph + '</span>' +
+          '<div class="sc-body"><div class="sc-title">' + esc(s.title) + ' ' + pill + '</div>' + mini +
+            '<div class="sc-goal">' + esc(s.goal) + '</div>' +
+            '<div class="sc-meta"><span class="chip time">⏱ ' + s.mins + '분</span>' +
+              '<span class="chip">' + esc(s.days) + '</span>' +
+              (s.song ? '<span class="chip song">' + esc(songTitle(s.song.dec)) + '</span>' : '') +
+              (part && !isDoneS ? '<span class="chip">' + part + '/' + s.gates.length + ' 통과</span>' : '') +
+            '</div></div>' +
+          '<span class="sc-state">›</span></div>';
       }).join('');
       return '<div class="phase' + (p.key ? ' key' : '') + '">' +
         '<div class="phead"><span class="pnum">' + p.n + '</span>' +
@@ -610,15 +958,50 @@
       ? '<div class="callout warn" style="margin-top:10px"><span class="lab">흔한 실수</span>' + mod.mistakes.map(esc).join('<br>') + '</div>' : '';
     if (qa || mis) stuck = '<div class="section"><h4>막히면</h4>' + qa + mis + '</div>';
 
-    /* 7. 통과 기준 */
+    /* 7. 통과 기준 — 2단 (예비 → 확정) */
+    var phase = stepPhase(s.id);
     var gateRows = s.gates.map(function (t, i) {
       return '<div class="check' + (g[i] ? ' done' : '') + '" data-gate="' + s.id + ':' + i + '">' +
         '<span class="box">✓</span><span class="cx">' + esc(t) + '</span></div>';
     }).join('');
-    var passBanner = passed
-      ? '<div class="passed">✓ 이 스텝을 통과했습니다' + (next ? ' — 다음은 <b>STEP ' + next.n + ' · ' + esc(next.title) + '</b>' : ' — 코스 완주!') + '</div>'
-      : '<div class="kbd-cap" style="margin-top:9px">세 가지가 모두 체크되면 다음 스텝으로 넘어가세요. 며칠 걸려도 정상입니다 (' + esc(s.days) + ').</div>';
-    var gateSec = '<div class="section"><h4>통과 기준 — 이게 되면 다음</h4>' + gateRows + passBanner + '</div>';
+    var meta = gateMeta(s.id);
+    var tier1 = '<div class="gt-tier gt-prov">' +
+      '<div class="gt-head"><span class="gt-num">1</span>오늘 확인 — 예비 통과</div>' +
+      '<div class="gt-sub">조건·수행·판정이 적힌 대로. 오늘 다 되면 예비 통과입니다.</div>' +
+      gateRows +
+      (phase !== 'open'
+        ? '<div class="provbanner">◐ <b>예비 통과</b> — 확정은 내일입니다. 내일 <b>워밍업 없이 첫 시도</b>로 아래 대표 항목을 다시 통과하면 확정됩니다. 어제의 성공은 위조할 수 없습니다.</div>'
+        : '<div class="kbd-cap" style="margin-top:9px">며칠 걸려도 정상입니다 (' + esc(s.days) + ').</div>') +
+      '</div>';
+
+    var t2cls = phase === 'due' ? '' : (phase === 'confirmed' ? '' : ' is-locked');
+    var tier2 = '<div class="gt-tier gt-conf' + t2cls + '">' +
+      '<div class="gt-head"><span class="gt-num">2</span>내일 확정 — 워밍업 없이 첫 시도' +
+        (phase === 'prov' ? '<span class="lockchip">내일 열림 · ' + shiftDay(todayStr(), 1) + '</span>' : '') +
+      '</div>' +
+      '<div class="gt-sub">피아노에 앉아 <b>가장 먼저</b> 이것부터. 되면 확정, 안 되면 하루 더.</div>' +
+      (phase === 'confirmed'
+        ? '<div class="passed">✓ <b>확정 통과</b>' + (next ? ' — 다음은 STEP ' + next.n + ' · ' + esc(next.title) : ' — 코스 완주!') + '</div>'
+        : '<div class="check big' + (phase === 'confirmed' ? ' done' : '') + '" data-conf="' + s.id + '">' +
+          '<span class="box">✓</span><span class="cx">' + esc(s.gates[0]) + ' — <b>첫 시도로</b></span></div>' +
+          (phase === 'due' ? '<div class="cta-row" style="margin-top:10px"><a class="btn sm warn" data-retry="' + s.id + '">안 됐다 — 하루 더</a></div>' : '')) +
+      '</div>';
+
+    var gateSec = '<div class="section"><h4>통과 기준 — 이게 되면 다음</h4>' +
+      '<div class="gatebox">' + tier1 + tier2 + '</div></div>';
+
+    /* 7-b. 이 소리가 나면 틀린 것 — 접히지 않는다 */
+    var earSec = '';
+    if (s.ear && s.ear.length) {
+      earSec = '<div class="errbox"><div class="eb-head">👂 이 소리가 나면 틀린 것</div>' +
+        s.ear.map(function (e) {
+          return '<div class="ebrow"><span class="eb-x">✗</span><div>' +
+            '<div class="eb-bad">' + esc(e.bad) + '</div>' +
+            '<div class="eb-why">' + e.why + '</div>' +
+            '<div class="eb-fix"><span class="eb-tag">고치기</span>' + e.fix + '</div>' +
+          '</div></div>';
+        }).join('') + '</div>';
+    }
 
     /* 8. 기록 */
     var deeper = '<div class="cta-row" style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap">' +
@@ -631,8 +1014,8 @@
 
     var totalMin = s.drills.reduce(function (a, d) { return a + d.m; }, 0);
 
-    return '<section class="view">' +
-      backTo('course', '연습 코스') +
+    return '<section class="view view--step">' +
+      backTo('course', '코스 지도') +
       '<div class="stephead' + (s.key ? ' key' : '') + '">' +
         '<div class="shmeta"><span class="shphase">' + esc(p.n + ' · ' + p.title) + '</span>' +
           '<span class="shn">STEP ' + s.n + ' / ' + total + '</span>' +
@@ -644,15 +1027,20 @@
       '</div>' +
       bridge +
       (s.note ? '<div class="callout tip"><span class="lab">참고</span>' + s.note + '</div>' : '') +
+      blkRevdeck(true) +
       '<div class="section"><h4>오늘 이렇게 연습하세요 · 총 ' + totalMin + '분</h4>' + drills + '</div>' +
-      kbdSec + songSec + lecSec + listenSec + stuck + gateSec + deeper + deepSec + nav +
+      kbdSec + earSec + songSec + lecSec + listenSec + stuck + gateSec + deeper + deepSec + nav +
+      '<div class="stepbar">' +
+        '<a class="btn" href="#course/' + s.id + '" data-scrollgate="1">통과 기준으로 ↓</a>' +
+        '<a class="btn solid" data-diarystep="' + s.id + '">📔 일지</a>' +
+      '</div>' +
     '</section>';
   }
 
   /* ════════════════ 뷰: 이용안내 ════════════════ */
   function viewGuide() {
     var quick = [
-      { t: '홈을 연다', d: '「이어서 하기」 카드에 오늘 할 스텝이 이미 정해져 있습니다. 고를 게 없습니다.' },
+      { t: '마이러닝을 연다', d: '맨 위 카드에 오늘 할 스텝이 이미 정해져 있습니다. 고를 게 없습니다.' },
       { t: '그 스텝 한 장만 본다', d: '왜 지금 이걸 → 분 단위 드릴 → 손 모양 → 곡의 어느 구간 → 강의 1편 → 오늘 들을 것. 위에서 아래로만.' },
       { t: '피아노 앞에서 그대로 실행', d: '드릴에 적힌 시간(3분·7분·5분…)을 지키세요. 하루 15~30분이면 충분합니다.' },
       { t: '통과 기준 3개를 체크', d: '다 되면 다음 스텝이 자동으로 열립니다. 며칠~2주 걸리는 게 정상입니다.' },
@@ -663,10 +1051,9 @@
     }).join('') + '</div>';
 
     var menus = [
-      { ic: '🧭', route: 'home', t: '홈', what: '오늘 할 스텝 하나 + 전체 진행률.', how: '매일 여기부터 여세요. 「이어서 하기」만 누르면 됩니다.' },
-      { ic: '🪜', route: 'course', t: '연습 코스 ★', what: '<b>매일 쓰는 화면.</b> 21개 하루치 연습 단위 + 사다리·심화·감상·강의 전체.', how: '스텝을 눌러 펼치고 드릴대로 연습 → 통과 기준 체크 → 다음 스텝.', main: true },
-      { ic: '✅', route: 'progress', t: '나의 진도', what: '코스 진행률(막별) + 이론 모듈 체크리스트.', how: '스텝을 통과하면 자동으로 반영됩니다. 브라우저에 저장.' },
-      { ic: '📔', route: 'diary', t: '연습일지', what: '날짜별 기록 · 체크리스트 · 메모.', how: '스텝 하단의 「이 스텝으로 연습일지 쓰기」로 항목 자동 입력 → 「선생님 검수용 복사」 → 채팅에 붙여넣기.' },
+      { ic: '🎯', route: 'my', t: '마이러닝 ★', what: '<b>매일 여는 화면.</b> 오늘 할 것 · 연속 기록 · 복습 · 진행 · 자료실.', how: '맨 위 카드 하나만 누르면 됩니다. 나머지는 내려가며 보면 되는 것들입니다.', main: true },
+      { ic: '🗺', route: 'course', t: '코스 지도', what: '21스텝 전체 조망 + 전환의 사다리 8계단.', how: '고르는 곳이 아니라 <b>어디까지 왔는지 보는 곳</b>입니다.' },
+      { ic: '📔', route: 'diary', t: '연습일지', what: '날짜별 기록 · 체크리스트 · 메모.', how: '스텝 하단 「이 스텝으로 연습일지 쓰기」 → 「선생님 검수용 복사」 → 채팅에 붙여넣기.' },
       { ic: '📖', route: 'guide', t: '이용안내', what: '지금 이 페이지.', how: '처음 한 번만 읽으면 됩니다.' }
     ];
     var menuHtml = menus.map(function (m) {
@@ -709,15 +1096,15 @@
       '이론·곡 분해·강의·감상은 따로 찾아다닐 필요 없이 <b>그 스텝 안에</b> 다 들어 있습니다.</p>' +
       '<div class="eyebrow">하루 사용법 · 5단계</div>' + quickHtml +
       '<div class="callout tip"><span class="lab">한 줄 요약</span>' +
-      '<b>홈 → 이어서 하기 → 그 한 장대로 연습 → 통과 기준 체크 → 일지.</b> 이 다섯 개 말고는 아무것도 안 해도 됩니다.</div>' +
-      '<div class="eyebrow">메뉴 5개가 전부입니다</div>' +
+      '<b>마이러닝 → 오늘 카드 → 그 한 장대로 연습 → 통과 기준 체크 → 일지.</b> 이 다섯 개 말고는 아무것도 안 해도 됩니다.</div>' +
+      '<div class="eyebrow">메뉴 4개가 전부입니다</div>' +
       '<p class="body">카드를 누르면 해당 화면으로 바로 이동합니다.</p>' +
       '<div class="pathmap">' + menuHtml + '</div>' +
       '<div class="eyebrow">화면 기호 읽는 법</div>' + legend +
       '<div class="eyebrow">추천 루틴</div>' + routine +
       '<div class="eyebrow">자주 막히는 질문</div>' + faq +
       '<div class="callout tip" style="margin-top:16px"><span class="lab">팁</span>콘텐츠를 수정했는데 화면이 안 바뀌면 브라우저를 <b>하드 새로고침</b>(Ctrl+Shift+R)하세요. 진도·일지는 이 브라우저에 저장됩니다.</div>' +
-      '<div class="cta-row" style="margin-top:18px;display:flex;gap:9px;flex-wrap:wrap"><a class="btn solid" data-go="course">연습 코스로 시작 →</a><a class="btn" data-go="home">홈으로</a></div>' +
+      '<div class="cta-row" style="margin-top:18px;display:flex;gap:9px;flex-wrap:wrap"><a class="btn solid" data-go="my">마이러닝으로 →</a><a class="btn" data-go="course">코스 지도</a></div>' +
     '</section>';
   }
 
@@ -934,23 +1321,27 @@
   }
   var keepScroll = false;
   var LEGACY = { ladder: 1, technique: 1, decoder: 1, listen: 1, lectures: 1 };
+  var TOMY = { home: 1, progress: 1 };
   function render() {
     var r = parseHash();
     var y = window.pageYOffset || document.documentElement.scrollTop;
     var html;
-    var pill = LEGACY[r.view] ? 'course' : r.view;
+    var pill = LEGACY[r.view] ? 'course' : (TOMY[r.view] ? 'my' : r.view);
     switch (r.view) {
+      case 'my': html = viewMy(); break;
       case 'guide': html = viewGuide(); break;
       case 'course': html = r.arg ? viewStep(r.arg) : viewCourse(); break;
-      case 'progress': html = viewProgress(); break;
       case 'diary': html = viewDiary(r.arg); break;
+      /* 홈·진도는 마이러닝이 흡수 — 옛 북마크 유지 */
+      case 'home': case 'progress': html = viewMy(); break;
       /* 구버전 북마크(#ladder·#technique·#decoder…) → 코스로 흡수됨 */
       case 'ladder': case 'technique': case 'decoder': case 'listen': case 'lectures':
         html = viewCourse(); break;
-      default: html = viewHome();
+      default: html = viewMy();
     }
     app.innerHTML = html;
     setActivePill(pill);
+    renderSysbar();
     if (keepScroll) { keepScroll = false; window.scrollTo({ top: y, behavior: 'auto' }); }
     else { window.scrollTo({ top: 0, behavior: 'auto' }); if (app.focus) app.focus(); }
   }
@@ -971,8 +1362,31 @@
 
   /* ── 이벤트 위임 ── */
   document.addEventListener('click', function (ev) {
-    var t = ev.target.closest('[data-go],[data-step],[data-gate],[data-diarystep],[data-toggle],[data-focus],[data-diary],[data-dtask],[data-dedit],[data-ddel],[data-dcopy],[data-sync]');
+    var t = ev.target.closest('[data-go],[data-step],[data-gate],[data-conf],[data-retry],[data-rev],[data-min],[data-diarystep],[data-toggle],[data-focus],[data-diary],[data-dtask],[data-dedit],[data-ddel],[data-dcopy],[data-sync]');
     if (!t) return;
+
+    /* 복습 카드 채점 — 그 자리에서 완결, 이동 없음 */
+    if (t.hasAttribute('data-rev')) {
+      var rp = t.getAttribute('data-rev').split(':');
+      reviewGrade(rp[0], rp[1]); markToday(false);
+      keepScroll = true; render(); return;
+    }
+    /* 확정 통과 (콜드 스타트) */
+    if (t.hasAttribute('data-conf')) {
+      confirmStep(t.getAttribute('data-conf')); markToday(false);
+      keepScroll = true; render(); return;
+    }
+    /* 확정 실패 — 하루 더 */
+    if (t.hasAttribute('data-retry')) {
+      ev.preventDefault();
+      unconfirm(t.getAttribute('data-retry')); markToday(false);
+      keepScroll = true; render(); return;
+    }
+    /* 최소 실행 티어 — 5분만 해도 연속 유지 */
+    if (t.hasAttribute('data-min')) {
+      ev.preventDefault(); markToday(true);
+      go('course', t.getAttribute('data-min')); return;
+    }
 
 
     if (t.hasAttribute('data-sync')) {
@@ -1007,6 +1421,8 @@
     if (t.hasAttribute('data-gate')) {
       var gp = t.getAttribute('data-gate').split(':');
       toggleGate(gp[0], +gp[1]);
+      if (gatesPassed(gp[0])) markProvisional(gp[0]);
+      markToday(false);
       keepScroll = true;
       render();
       return;
