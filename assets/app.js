@@ -311,6 +311,42 @@
       (otherSteps ? '<hr class="rule"><div class="miniban">이 곡을 쓰는 코스 스텝</div><div class="cta-row" style="margin-top:9px;display:flex;gap:8px;flex-wrap:wrap">' + otherSteps + '</div>' : '');
   }
 
+  /* ── 그 스텝의 곡·구간을 실제 보이싱으로 ──
+     course.js의 voice = {seg, from, to, form} 은 코드 심볼을 복제하지 않고
+     content.js DECODER[].harmony[seg].bars[] 를 가리킨다 (단일 진실원 유지). */
+  var FORM_KR = { shell: '셸 (루트+3+7)', guide: '가이드톤 (3·7)',
+                  rootlessA: '루트리스 A형', rootlessB: '루트리스 B형' };
+  function songVoicing(s) {
+    if (!window.VOICING || !s.voice || !s.song) return null;
+    var song = songById(s.song.dec);
+    if (!song) return null;
+    var seg = song.harmony[s.voice.seg || 0];
+    if (!seg) return null;
+
+    var syms = [];
+    seg.bars.slice(s.voice.from || 0, s.voice.to == null ? 4 : s.voice.to)
+      .forEach(function (b) {
+        String(b.c).split('·').forEach(function (c) { c = c.trim(); if (c) syms.push(c); });
+      });
+    if (!syms.length) return null;
+
+    var voiced = VOICING.progression(syms, s.voice.form || 'shell');
+    var chords = voiced.filter(function (v) { return v.notes; }).map(function (v) {
+      return { name: v.sym, lh: VOICING.marks(v, 'L'), rh: [] };
+    });
+    if (!chords.length) return null;
+
+    var sp = VOICING.span(voiced, 2);
+    return {
+      chords: chords,
+      lo: sp ? M.midiToName(sp.lo) : 'C3',
+      hi: sp ? M.midiToName(sp.hi) : 'C5',
+      cap: esc(song.title) + ' · ' + esc(song.key) + ' — ' +
+           (FORM_KR[s.voice.form] || s.voice.form) + '. ' +
+           esc(seg.seg) + '의 진행을 보이스리딩으로 이은 자리입니다.'
+    };
+  }
+
   /* ── 오늘 들을 것 (감상·음반을 스텝 안으로) ── */
   function listenPick(s) {
     if (!s.listen) return '';
@@ -501,10 +537,16 @@
         '<span class="dc"><b>' + esc(d.t) + '</b><span class="dd">' + d.d + '</span></span></div>';
     }).join('') + '</div>';
 
-    /* 3. 손 모양 (사다리 rung 또는 모듈 예시) */
-    var kbd = '';
+    /* 3. 손 모양
+       곡이 붙은 스텝은 그 곡의 실제 코드로 그린다(voicing.js). 예전에는 조와 무관하게
+       사다리 rung(C장조 고정)을 재사용해서, Autumn Leaves 스텝에 C장조 건반이 나왔다. */
+    var kbd = '', kbdCap = '';
     var mod = s.mod ? D.modules[s.mod] : null;
-    if (s.kbdFrom === 'mod' && mod && mod.example) {
+    var vc = s.voice && s.song ? songVoicing(s) : null;
+
+    if (vc && vc.chords.length) {
+      kbd = chordGroup(vc.chords, vc.cap, { shared: { lo: vc.lo, hi: vc.hi } });
+    } else if (s.kbdFrom === 'mod' && mod && mod.example) {
       kbd = chordGroup(mod.example.chords, mod.example.cap);
     } else if (s.rung != null && D.ladder[s.rung]) {
       var r = D.ladder[s.rung];
